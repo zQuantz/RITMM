@@ -12,7 +12,7 @@ import signal
 DIR = Path(os.path.dirname(os.path.realpath(__file__)))
 shutdown = False
 
-PORT = 10001
+PORT = 10002
 
 MAX_VOLUME = 5_000
 MAX_POSITION = 25_000
