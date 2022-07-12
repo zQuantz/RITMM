@@ -1,4 +1,6 @@
 from time import sleep
+import pandas as pd
+import numpy as np
 import requests
 import signal
 import sys
@@ -49,17 +51,17 @@ def get_security_info(session, data):
 	resp = session.get("http://localhost:9999/v1/securities?ticker=ALGO")
 	if resp.ok:
 		resp = resp.json()
-		data['position'] = resp['position']
+		data['position'] = resp[0]['position']
 		return data
 	return ApiException("Auth Error. Check API Key")
 
 OBKEYS = ['price', 'quantity', 'quantity_filled']
-def aggregate_order_book(items, isBid = True):
+def aggregate_order_book(items, ascending):
 	df = pd.DataFrame(
 		[
 			{
 				key: bid[key]
-				for key in OBCOLS
+				for key in OBKEYS
 			}
 			for bid in items
 			if bid['status'] == "OPEN"
@@ -68,16 +70,16 @@ def aggregate_order_book(items, isBid = True):
 	)
 	df['quantity'] = df.quantity - df.quantity_filled
 	df = df[df.quantity != 0].drop('quantity_filled', axis=1)
-	df = df.groupby('quantity').sum().sort_index(ascending = !isBid).reset_index()
+	df = df.groupby('price').sum().sort_index(ascending = ascending).reset_index()
 	vwap = (df.price * (df.quantity / df.quantity.sum())).sum()
 	return df, vwap
 
 def get_order_book(session, data):
-	resp = session.get(f"http://localhost:9999/v1/securities?ticker=ALGO&limit={BOOK_LIMIT}")
+	resp = session.get(f"http://localhost:9999/v1/securities/book?ticker=ALGO&limit={BOOK_LIMIT}")
 	if resp.ok:
 		resp = resp.json()
-		data['bid_ladder'], data['bid_vwap'] = aggregate_order_book(resp['bid'])
-		data['ask_ladder'], data['ask_vwap'] = aggregate_order_book(resp['ask'], isBid = False)
+		data['bid_ladder'], data['bid_vwap'] = aggregate_order_book(resp['bids'], False)
+		data['ask_ladder'], data['ask_vwap'] = aggregate_order_book(resp['asks'], False)
 		return data
 	return ApiException("Auth Error. Check API Key")
 
@@ -128,13 +130,24 @@ def cancel_all_orders(session, data):
 
 def main():
 
-	tick = 0
+	tick = 0 
 
 	with requests.Session() as session:
 		session.headers.update(API_KEY)
-		while tick != 300:
-			tick = get_tick(session)
-			print(tick)
+		while data['tick'] != 300:
+			
+			## Gather information
+			get_tick(session, data)
+			get_security_info(session, data)
+			get_order_book(session, data)
+			get_price_history(session, data)
+
+			if data['tick'] != tick:
+				print(data['tick'])
+				print(data['ask_ladder'])
+				print(data['bid_ladder'])
+				print("-----------------------")
+				tick = data['tick']
 
 if __name__ == '__main__':
 
