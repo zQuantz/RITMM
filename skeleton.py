@@ -20,7 +20,7 @@ MKT_COM = 0.01
 LMT_COM = 0.005
 
 BOOK_LIMIT = 40
-VOL_CALIBRATION = 1.5
+VOL_CALIBRATION = 2
 
 data = {
     'tick': 0,
@@ -36,6 +36,9 @@ data = {
     'mid': 0,
     'ask_ladder': pd.DataFrame(),
     'ohlc': pd.DataFrame(),
+    'bid_price': 0,
+    'ask_price': 0,
+    'n_transacted_orders': 0
 }
 
 ###################################################################################################
@@ -117,6 +120,21 @@ def get_time_and_sales(session, data):
         data['tas'] = df
     return ApiException("Auth Error. Check API Key")
 
+def get_open_orders(session):
+    resp = session.get(f"http://localhost:9999/v1/orders?status=OPEN")
+    if resp.ok: return resp.json()
+    return ApiException("Auth Error. Check API Key")
+
+def get_transacted_orders(session):
+    resp = session.get(f"http://localhost:9999/v1/orders?status=TRANSACTED")
+    if resp.ok: return resp.json()
+    return ApiException("Auth Error. Check API Key")
+
+def get_order_details(session, _id):
+    resp = session.get(f"http://localhost:9999/v1/orders?{_id}")
+    if resp.ok: return resp.json()
+    return ApiException("Auth Error. Check API Key")
+
 ## Subject to rate limits
 def send_order(session, data, _type, quantity, action, price = 0):
     params = {
@@ -132,79 +150,100 @@ def send_order(session, data, _type, quantity, action, price = 0):
         sleep(resp.json()['wait'] / 1_000)
         resp = session.post("http://localhost:9999/v1/orders", params = params)
     if resp.ok:
-        print("Order Placed", resp.json()['order_id'])
+        return resp.json()['order_id']
     return ApiException("Auth Error. Check API Key")
 
-def cancel_all_orders(session, data):
+def cancel_all_orders(session):
     resp = session.post(f"http://localhost:9999/v1/commands/cancel?all=1")
     if resp.ok:
         print("Cacelled All Orders")
     return ApiException("Auth Error. Check API Key")
 
+def bookkeeping(orders):
+    buy_orders = [
+        order
+        for order in orders
+        if order['action'] == "BUY"
+    ]
+    sell_orders = [
+        order
+        for order in orders
+        if order['action'] == "SELL"
+    ]
+
 def vol_spreading(data, estimator, calibration):
     ohlc = data['ohlc']
     tassagg = data['tas']
-    time_factor = ((tassagg['avg_trade_volume'] / (tassagg['total_volume'] + 1)) ** 2).values.mean()
+    data['time_factor'] = ((tassagg['avg_trade_volume'] / (tassagg['total_volume'] + 1)) ** 2).values.mean()
     data['vol'] = estimator(ohlc, time_step=1)
-    data['vol_spread'] = round(calibration * time_factor * data['vol'] * data['mid'], 2)
-    bid_price = round(data['mid'] - data['vol_spread'], 2)
-    ask_price = round(data['mid'] + data['vol_spread'], 2)
-    return bid_price, ask_price
+    data['vol_spread'] = round(calibration * data['time_factor'] * data['vol'] * data['mid'], 2)
 
-def inventory_skewing(data, bid, ask):
+def inventory_skewing(data):
 
     pos = data['position']
-    bid_skew = (pos // MAX_VOLUME) * int(pos > 0) * 1
-    ask_skew = (pos // MAX_VOLUME) * int(pos < 0) * -1
+    F = abs(pos // MAX_VOLUME) * 2
 
-    bid_price = round(bid - bid_skew * data['vol_spread'], 2)
-    ask_price = round(ask + ask_skew * data['vol_spread'], 2)
+    if pos > 0:
+        ask = data['mid'] + data['vol_spread'] * (1 / (1 + F))
+        bid = data['mid'] - (1 + F) * data['vol_spread']
+    elif pos < 0:
+        ask = data['mid'] + (1 + F) * data['vol_spread']
+        bid = data['mid'] - data['vol_spread'] * (1 / (1 + F))
+    else:
+        ask = data['mid'] + data['vol_spread']
+        bid = data['mid'] - data['vol_spread']
 
-    return bid_price, ask_price
-
-# def send_orders(session, data)
+    return round(bid, 2), round(ask, 2)
 
 ###################################################################################################
 
 def main():
 
-    best_bid, best_ask, tick = 0, 0, 0
+    tick = 0
+    position = 0
+    init = True
 
     with requests.Session() as session:
         session.headers.update(API_KEY)
 
         while data['tick'] != 299:
             
-            ## Gather information
+            ## Dont trade for 5 seconds
             get_tick(session, data)
             if data['tick'] < 5:
                 continue
 
-            get_security_info(session, data)
-            get_order_book(session, data)
-            get_price_history(session, data)
-            get_time_and_sales(session, data)
+            transacted_orders = get_transacted_orders(session)
+            n = data['n_transacted_orders']
+            if len(transacted_orders) != n or init:
+                
+                cancel_all_orders(session)
 
-            # print(data['best_bid'] != best_bid, data['best_ask'] != best_ask, data['tick'] - tick > 0)
-            if data['best_bid'] != best_bid or data['best_ask'] != best_ask:
+                get_security_info(session, data)
+                get_order_book(session, data)
+                get_price_history(session, data)
+                get_time_and_sales(session, data)
+                
+                vol_spreading(data, c2c_vol, VOL_CALIBRATION)
+                bid, ask = inventory_skewing(data)
+                
+                print("------------")
+                print("Tick", data['tick'])
+                print("N-transaction", len(transacted_orders))
+                print("Bid", bid)
+                print("Mid", data['mid'])
+                print("Ask", ask)
+                print("Position", data['position'])
+                print("Volatility", round(data['vol'] * 100, 4))
+                print("Vol-Spread", data['vol_spread'])
+                print("Time-Factor", data['time_factor'])
+                print("Abs-Spread", round(ask - bid, 2))
 
-                # print("Cancelling Orders")
-                cancel_all_orders(session, data)
-                # print("Calculating Inventory Skew")
-                # bid_price, ask_price = inventory_skew(session, data)
-
-                bid_price, ask_price = vol_spreading(data, c2c_vol, VOL_CALIBRATION)
-                bid_price, ask_price = inventory_skewing(data, bid_price, ask_price)
-                print(bid_price, data['mid'], ask_price, "||", data['vol'], data['vol_spread'])
-
-                send_order(session, data, "LIMIT", MAX_VOLUME, "BUY", bid_price)
-                send_order(session, data, "LIMIT", MAX_VOLUME, "SELL", ask_price)
-
-                best_bid = data['best_bid']
-                best_ask = data['best_ask']
-
-            if data['tick'] != tick:
-                tick = data['tick']
+                send_order(session, data, "LIMIT", MAX_VOLUME, "BUY", bid)
+                send_order(session, data, "LIMIT", MAX_VOLUME, "SELL", ask)
+                
+                data['n_transacted_orders'] = len(transacted_orders)
+                init = False
 
 if __name__ == '__main__':
 
