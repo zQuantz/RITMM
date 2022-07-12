@@ -86,7 +86,7 @@ def main():
 	with requests.Session() as session:
 		session.headers.update(API_KEY)
 
-		while data['tick'] != 300:
+		while data['tick'] != 299:
 			
 			get_tick(session, data)
 			if data['tick'] != tick:
