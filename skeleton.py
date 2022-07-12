@@ -161,18 +161,24 @@ def cancel_all_orders(session, data):
 def inventory_skew(session, data):
 
 	pos = data['position']
-	bid_skew = (pos // 5_000) * (1 if pos > 0 else 0)
-	ask_skew = (pos // 5_000) * (-1 if pos < 0 else 0)
+	bid_skew = (pos // 5_000) * int(pos > 0) * 1
+	ask_skew = (pos // 5_000) * int(pos < 0) * -1
+
 	bid_price = round(data['best_bid'] - bid_skew * 0.02, 2)
 	ask_price = round(data['best_ask'] + ask_skew * 0.02, 2)
-	print(pos, bid_price, bid_skew, ask_price, ask_skew)
+	# print("Position:", pos)
+	# print("Best Bid Price", data['best_bid'])
+	# print("Bid Price", bid_price)
+	# print("Best Ask Price", data['best_ask'])
+	# print("Ask Price", ask_price)
+	# print("------")
 	return bid_price, ask_price
 
 ###################################################################################################
 
 def main():
 
-	best_bid, best_ask = 0, 0
+	best_bid, best_ask, tick = 0, 0, 0
 
 	with requests.Session() as session:
 		session.headers.update(API_KEY)
@@ -185,37 +191,19 @@ def main():
 			get_order_book(session, data)
 			# get_price_history(session, data)
 
-			if data['best_bid'] != best_bid or data['best_ask'] != best_ask:
-
-				cancel_all_orders(session, data)
-				inventory_skew(session, data)
-				send_order(session, data, "LIMIT", MAX_VOLUME, "BUY", data['best_bid'])
-				send_order(session, data, "LIMIT", MAX_VOLUME, "SELL", data['best_ask'])
-				best_bid = data['best_bid']
-				best_ask = data['best_ask']
-
-			# if data['tick'] != tick:
-
-			# 	print(data['vol'])
-			# 	print(data['ohlc'])
+			# if data['best_bid'] != best_bid or data['best_ask'] != best_ask:
 
 			# 	cancel_all_orders(session, data)
-			# 	print(data['orders'])
+			# 	inventory_skew(session, data)
+			# 	send_order(session, data, "LIMIT", MAX_VOLUME, "BUY", data['best_bid'])
+			# 	send_order(session, data, "LIMIT", MAX_VOLUME, "SELL", data['best_ask'])
+			# 	best_bid = data['best_bid']
+			# 	best_ask = data['best_ask']
 
-			# 	bid_order_price = round(data['bid_vwap'], 2)
-			# 	ask_order_price = round(data['ask_vwap'], 2)
+			if data['tick'] != tick:
 
-			# 	send_order(session, data, "LIMIT", MAX_VOLUME, "BUY", bid_order_price)
-			# 	# data['bid_order_id'] = data['orders'][-1]
-			# 	send_order(session, data, "LIMIT", MAX_VOLUME, "SELL", ask_order_price)
-			# 	# data['ask_order_id'] = data['orders'][-1]
-			# 	print(data['orders'])
-
-			# 	print(data['tick'])
-			# 	print(round(data['bid_vwap'], 2))
-			# 	print(round(data['ask_vwap'], 2))
-			# 	print("-----------------------")
-			# 	tick = data['tick']
+				print(data['tick'])
+				tick = data['tick']
 
 		get_full_time_and_sales(session)
 		get_full_price_history(session)
