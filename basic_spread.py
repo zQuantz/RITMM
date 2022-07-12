@@ -28,3 +28,9 @@ def return_vol_estimator(close_data):
     mu = x.mean()
     vol = np.std(x-mu, ddof=1)
     return mu, vol
+
+def perf_bid_ask_factor(ohlc, tasagg, calibration):
+    time_factor = ((tassagg['avg_trade_volume']/ (tassagg['total_volume'] + 1)) ** 2).values.mean()
+    vol = rogers_satchell_vol(ohlc, time_step=1)
+    spread = calibration * time_factor * vol
+    return spread
