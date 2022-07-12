@@ -1,3 +1,4 @@
+from config import API_KEY
 from time import sleep
 import pandas as pd
 import numpy as np
@@ -7,7 +8,6 @@ import sys
 
 ###################################################################################################
 
-API_KEY = {'X-API-Key': '4RBO5VMI'}
 shutdown = False
 
 MAX_VOLUME = 5_000
