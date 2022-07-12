@@ -16,7 +16,7 @@ MKT_COM = 0.01
 LMT_COM = 0.005
 
 BOOK_LIMIT = 40
-VOL_LOOKBACK = 30
+VOL_LOOKBACK = 10
 
 data = {
 	'tick': 0,
@@ -27,7 +27,9 @@ data = {
 	'bid_ladder': pd.DataFrame(),
 	'ask_ladder': pd.DataFrame(),
 	'ohlc': pd.DataFrame(),
-	"orders": []
+	"orders": [],
+	"bid_order_id": None,
+	"ask_order_id": None
 }
 
 ###################################################################################################
@@ -86,9 +88,9 @@ def get_order_book(session, data):
 
 HISTCOLS = ['tick', 'open', 'high', 'low', 'close']
 def get_price_history(session, data):
-	resp = session.get(f"http://localhost:9999/v1/history?ticker=ALGO&limit={VOL_LOOKBACK + 1}")
+	resp = session.get(f"http://localhost:9999/v1/securities/history?ticker=ALGO&limit={VOL_LOOKBACK + 1}")
 	if resp.ok:
-		df = pd.DataFrame(resp.json(), columns = HISTCOLS)
+		df = pd.DataFrame(resp.json(), columns = HISTCOLS).sort_values('tick', ascending = True)
 		vol = np.log(1 + df.close.pct_change()).dropna()
 		data['vol'] = np.sqrt((vol * vol).mean()) ## Insert vol calcs here
 		data['ohlc'] = df
@@ -97,31 +99,31 @@ def get_price_history(session, data):
 
 ## Subject to rate limits
 def send_order(session, data, _type, quantity, action, price = 0):
-	body = {
+	params = {
 		'ticker': 'ALGO',
 		'type': _type,
 		'quantity': quantity,
+		'price': str(price).replace(".", ","),
 		'action': action,
-		'price': price,
 	}
 	if _type == "MARKET": body['dry_run'] = 0
-	resp = session.post("http://localhost:9999/v1/orders", data = body)
-	if response.status_code == 429:
+	resp = session.post("http://localhost:9999/v1/orders", params = params)
+	if resp.status_code == 429:
 		time.sleep(resp.json()['wait'])
-		resp = session.post("http://localhost:9999/v1/orders", data = body)
+		resp = session.post("http://localhost:9999/v1/orders", params = params)
 	if resp.ok:
 		data['orders'].append(resp.json()['order_id'])
 	return ApiException("Auth Error. Check API Key")
 
 def cancel_all_orders(session, data):
 	if len(data['orders']) == 0: return
-	resp = session.get(f"http://localhost:9999/v1/history?ids={','.join(data['orders'])}")
+	resp = session.post(f"http://localhost:9999/v1/commands/cancel?ids={','.join(map(str, data['orders']))}")
 	if resp.ok:
 		cancelled_orders = resp.json()['cancelled_order_ids']
 		data['orders'] = [
 			oid
 			for oid in data['orders']
-			if oid not in dat['orders']
+			if oid not in data['orders']
 		]
 		return data
 	return ApiException("Auth Error. Check API Key")
@@ -143,9 +145,25 @@ def main():
 			get_price_history(session, data)
 
 			if data['tick'] != tick:
+
+				print(data['vol'])
+				print(data['ohlc'])
+
+				cancel_all_orders(session, data)
+				print(data['orders'])
+
+				bid_order_price = round(data['bid_vwap'], 2)
+				ask_order_price = round(data['ask_vwap'], 2)
+
+				send_order(session, data, "LIMIT", MAX_VOLUME, "BUY", bid_order_price)
+				# data['bid_order_id'] = data['orders'][-1]
+				send_order(session, data, "LIMIT", MAX_VOLUME, "SELL", ask_order_price)
+				# data['ask_order_id'] = data['orders'][-1]
+				print(data['orders'])
+
 				print(data['tick'])
-				print(data['ask_ladder'])
-				print(data['bid_ladder'])
+				print(round(data['bid_vwap'], 2))
+				print(round(data['ask_vwap'], 2))
 				print("-----------------------")
 				tick = data['tick']
 
