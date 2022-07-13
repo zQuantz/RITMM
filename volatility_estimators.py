@@ -31,7 +31,7 @@ def c2c_vol(ohlc, time_step=1):
     return np.log(1+ohlc.close.pct_change()).std()
 
 def return_vol_error(close_data, time_step=1):
-    mu, vol = return_vol_estimator(close_data)    
+    mu, vol = return_vol_estimator(close_data)
     mu_error = np.sqrt(vol ** 4 / 2 + vol ** 2 / time_step) / np.sqrt(close_data.shape[0])
     vol_error = np.sqrt(vol ** 2 / 2) / np.sqrt(close_data.shape[0])
     return mu_error, vol_error
@@ -40,4 +40,4 @@ def z_score_trend_indicator(close_data, time_step=1):
     mu, vol = return_vol_estimator(close_data)
     mu_error, vol_error = return_vol_error(close_data, time_step=1)
     zscore = mu / mu_error
-    return mu, zscore
+    return mu, abs(zscore)
