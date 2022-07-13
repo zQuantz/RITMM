@@ -18,11 +18,13 @@ def garman_klass_vol(ohlc_data, time_step=1):
     argument = 1/2 * np.log(hi/lo) ** 2 - (2 * np.log(2) - 1) * np.log(cl/op) ** 2 
     return np.sqrt(1 / op.shape[0] * np.sum(argument))
 
-def return_vol_estimator(close_data):
+def return_vol_estimator(close_data,  time_step=1):
     price = pd.Series(close_data).values
     x = np.log(price[1:]) - np.log(price[:-1])
-    mu = x.mean()
-    vol = np.std(x-mu, ddof=1)
+    xavg = x.mean()
+    xvar = x.var(ddof=1)
+    mu = xavg / time_step + xvar / (2 * time_step)
+    vol = np.sqrt(xvar / time_step)
     return mu, vol
 
 def c2c_vol(ohlc, time_step=1):
@@ -38,4 +40,4 @@ def z_score_trend_indicator(close_data, time_step=1):
     mu, vol = return_vol_estimator(close_data)
     mu_error, vol_error = return_vol_error(close_data, time_step=1)
     zscore = mu / mu_error
-    return zscore
+    return mu, zscore
