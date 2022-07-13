@@ -18,8 +18,8 @@ MKT_COM = 0.01
 LMT_COM = 0.005
 
 BOOK_LIMIT = 40
-VOL_CALIBRATION = 2.5
-N_ORDERS = 5
+VOL_CALIBRATION = 1.5
+N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 50
 
 START_TICK = 10
@@ -38,10 +38,6 @@ data = {
     'ask': 0,
 
     ## Order Book Info
-    'best_bid': 0,
-    'best_ask': 0,
-    'mid': 0,
-    'best_spread': 0,
     'bid_ladder': pd.DataFrame(),
     'ask_ladder': pd.DataFrame(),
     'bid_vwap': 0,
@@ -92,7 +88,7 @@ def get_security_info(session, data):
         data['position'] = resp['position']
         data['position_vwap'] = resp['vwap'] 
         data['last'] = resp['last']
-        data['pmid'] = round((resp['bid'] + resp['ask']) / 2, 2)
+        data['mid'] = round((resp['bid'] + resp['ask']) / 2, 2)
         data['bid'] = resp['bid']
         data['ask'] = resp['ask']
         return data
@@ -125,13 +121,7 @@ def get_order_book(session, data):
         data['ask_ladder'], data['ask_vwap'] = aggregate_order_book(resp['asks'], False)
         if data['bid_ladder'].shape[0] == 0 or data['ask_ladder'].shape[0] == 0:
             return data
-        
-        ## Order Book Statistics
-        data['best_bid'] = data['bid_ladder'].price.values[0]
-        data['best_ask'] = data['ask_ladder'].price.values[-1]
-        data['mid'] = round((data['best_bid'] + data['best_ask']) / 2, 3)
-        data['best_spread'] = round(data['best_ask'] - data['best_bid'], 2)
-        
+                
         bid_volume = data['bid_ladder'].quantity.sum()
         ask_volume = data['ask_ladder'].quantity.sum()
         data['LOB_imbalance'] = (bid_volume - ask_volume) / (bid_volume + ask_volume)
@@ -139,7 +129,9 @@ def get_order_book(session, data):
         bid_vwap_spread = data['mid'] - data['bid_vwap']
         ask_vwap_spread = data['ask_vwap'] - data['mid']
         data['LOB_mass_imbalance'] =  (ask_vwap_spread - bid_vwap_spread) / (bid_vwap_spread + ask_vwap_spread)
+
         return data
+
     return ApiException("Auth Error. Check API Key")
 
 HISTCOLS = ['tick', 'open', 'high', 'low', 'close']
@@ -249,7 +241,7 @@ def get_liquidating_orders(data):
     n = abs(int(pos // MAX_VOLUME))
     r = abs(int(pos % MAX_VOLUME))
     action = "BUY" if pos < 0 else "SELL"
-    price = data['best_bid'] if pos < 0 else data['best_ask']
+    price = data['bid'] if pos < 0 else data['ask']
 
     orders = [
         build_order("LIMIT", MAX_VOLUME, price, action)
@@ -277,9 +269,11 @@ def cancel_all_orders(session):
 
 def vol_spreading(data, calibration):
     ohlc = data['ohlc']
-    tassagg = data['tas']
-    data['time_factor'] = ((tassagg['avg_trade_volume'] / (tassagg['total_volume'] + 1)) ** 2).values.mean()
-    data['vol_spread'] = round(calibration * data['time_factor'] * data['vol'] * data['mid'], 2)
+    tas = data['tas']
+    data['time_factor'] = ((tas['avg_trade_volume'] / (tas['total_volume'] + 1)) ** 2).values.mean()
+    data['vol_spread'] = round(calibration * data['vol'] * data['mid'], 2)
+
+    # data['vol_spread'] = round(calibration * data['time_factor'] * data['vol'] * data['mid'], 2)
 
 def inventory_skewing(data):
 
@@ -299,10 +293,10 @@ def inventory_skewing(data):
     return round(bid, 2), round(ask, 2)
 
 def init_log():
-    logger.info("tick,last,bid,pmid,ask,best_bid,mid,best_ask,bid_vwap,ask_vwap,LOB_imbalance,LOB_mass_imbalance,vol,time_factor,vol_spread,trend,trend_confidence,gtrend,gtrend_confidence,position,current_bid,position_vwap,current_ask")
+    logger.info("tick,last,bid,mid,ask,bid_vwap,ask_vwap,LOB_imbalance,LOB_mass_imbalance,vol,time_factor,vol_spread,trend,trend_confidence,gtrend,gtrend_confidence,position,current_bid,position_vwap,current_ask")
 
 def log(data):
-    logger.info(f"{data['tick']},{data['last']},{data['bid']},{data['pmid']},{data['ask']},{data['best_bid']},{data['mid']},{data['best_ask']},{data['bid_vwap']},{data['ask_vwap']},{data['LOB_imbalance']},{data['LOB_mass_imbalance']},{data['vol']},{data['time_factor']},{data['vol_spread']},{data['trend']},{data['trend_confidence']},{data['gtrend']},{data['gtrend_confidence']},{data['position']},{data['current_bid']},{data['position_vwap']},{data['current_ask']}")
+    logger.info(f"{data['tick']},{data['last']},{data['bid']},{data['mid']},{data['ask']},{data['bid_vwap']},{data['ask_vwap']},{data['LOB_imbalance']},{data['LOB_mass_imbalance']},{data['vol']},{data['time_factor']},{data['vol_spread']},{data['trend']},{data['trend_confidence']},{data['gtrend']},{data['gtrend_confidence']},{data['position']},{data['current_bid']},{data['position_vwap']},{data['current_ask']}")
 
 ###################################################################################################
 
@@ -311,71 +305,71 @@ def log(data):
 
 def main():
 
-    tick = 0
-    position = 0
-    init = True
-
-    init_log()
+    # init_log()
 
     with requests.Session() as session:
         session.headers.update(API_KEY)
 
-        while data['tick'] != 299:
-            
-            ## Dont trade for first 5 ticks
-            get_tick(session, data)
-            if data['tick'] < START_TICK:
-                continue
+        while True:
 
-            ## Liquidate everything with 10 ticks remaining
-            if data['tick'] > END_TICK:
+            data['n_transacted_orders'] = 0
+            data['tick'] = 0
+            init = True
+
+            while data['tick'] != 299:
+                
+                ## Dont trade for first 5 ticks
+                get_tick(session, data)
+                if data['tick'] < START_TICK:
+                    continue
+
+                ## Liquidate everything with 10 ticks remaining
+                if data['tick'] > END_TICK:
+                    get_order_book(session, data)
+                    cancel_all_orders(session)
+                    orders = get_liquidating_orders(data)
+                    for order in orders:
+                        send_order(session, order)
+
+                get_security_info(session, data)
                 get_order_book(session, data)
-                cancel_all_orders(session)
-                orders = get_liquidating_orders(data)
-                for order in orders:
-                    send_order(session, order)
+                get_price_history(session, data)
+                get_time_and_sales(session, data)
 
-            get_security_info(session, data)
-            get_order_book(session, data)
-            get_price_history(session, data)
-            get_time_and_sales(session, data)
+                # log(data)
 
-            log(data)
+                transacted_orders = get_transacted_orders(session)
+                n = data['n_transacted_orders']
+                if data['position'] != 0:
+                    print(f"Position: {data['position']}, PnL/Share: {np.sign(data['position']) * (data['position_vwap'] - data['mid'])}")
+                    
+                if len(transacted_orders) != n or init:
+                    
+                    cancel_all_orders(session)
+                    
+                    vol_spreading(data, VOL_CALIBRATION)
+                    bid, ask = inventory_skewing(data)
+                    data['current_bid'] = bid
+                    data['current_ask'] = ask
+                    
+                    print("------------")
+                    print("Tick", data['tick'])
+                    print("N-transaction", len(transacted_orders))
+                    print(f"({bid}, {data['mid']}, {ask})")
+                    print("Position", data['position'])
+                    print("VWAP", data['position_vwap'])
+                    print("P&L", (data['position_vwap'] - data['mid']) * data['position'])
+                    print("Volatility", round(data['vol'] * 100, 4))
+                    print("Vol-Spread", data['vol_spread'])
 
-            transacted_orders = get_transacted_orders(session)
-            n = data['n_transacted_orders']
-            if len(transacted_orders) != n or init:
-                
-                cancel_all_orders(session)
-                
-                vol_spreading(data, VOL_CALIBRATION)
-                bid, ask = inventory_skewing(data)
-                data['current_bid'] = bid
-                data['current_ask'] = ask
-                
-                print("------------")
-                print("Tick", data['tick'])
-                print("N-transaction", len(transacted_orders))
-                print("Bid", bid)
-                print("Mid", data['mid'])
-                print("Ask", ask)
-                print("Position", data['position'])
-                print("Volatility", round(data['vol'] * 100, 4))
-                print("Vol-Spread", data['vol_spread'])
-                print("Time-Factor", data['time_factor'])
-                print("Abs-Spread", round(ask - bid, 2))
-                print("Best BBO Spread", round(data['best_spread'], 2))
-                print("LOB Imbalance", round(100 * data['LOB_imbalance'], 2))
-                print("LOB Mass Imbalance", round(100 * data['LOB_mass_imbalance'], 2))
-
-                buy_orders, sell_orders = get_orders(data, bid, ask)
-                for order in buy_orders:
-                    send_order(session, order)
-                for order in sell_orders:
-                    send_order(session, order)
-                
-                data['n_transacted_orders'] = len(transacted_orders)
-                init = False
+                    buy_orders, sell_orders = get_orders(data, bid, ask)
+                    for order in buy_orders:
+                        send_order(session, order)
+                    for order in sell_orders:
+                        send_order(session, order)
+                    
+                    data['n_transacted_orders'] = len(transacted_orders)
+                    init = False
 
 if __name__ == '__main__':
 
