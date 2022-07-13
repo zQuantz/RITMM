@@ -19,8 +19,9 @@ LMT_COM = 0.005
 
 BOOK_LIMIT = 40
 VOL_CALIBRATION = 2.5
-N_ORDERS = 5
+N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 50
+TREND_SKEW_CALIBRATION = 1
 
 START_TICK = 10
 END_TICK = 290
@@ -200,7 +201,7 @@ def build_order(_type, quantity, price, action):
         'ticker': 'ALGO',
         'type': _type,
         'quantity': quantity,
-        'price': str(price).replace(".", ","),
+        'price': price,
         'action': action,
     }
 
@@ -281,20 +282,37 @@ def vol_spreading(data, calibration):
     data['time_factor'] = ((tassagg['avg_trade_volume'] / (tassagg['total_volume'] + 1)) ** 2).values.mean()
     data['vol_spread'] = round(calibration * data['time_factor'] * data['vol'] * data['mid'], 2)
 
-def inventory_skewing(data):
+def trend_skewing(data):
+    ask = data['mid'] + data['vol_spread']
+    bid = data['mid'] - data['vol_spread']
+
+    if data['gtrend_confidence'] > 1.5:
+    	trend = data['gtrend']
+    	vol = data['vol']
+    	
+    	ask = np.exp(TREND_SKEW_CALIBRATION * trend / np.sqrt(vol)) * ask
+    	bid = np.exp(TREND_SKEW_CALIBRATION * trend / np.sqrt(vol)) * bid
+
+    	if bid >= data['mid']:
+    		bid = data['mid']
+
+    	if ask <= data['mid']:
+    		ask = data['mid']
+
+    return round(bid, 2), round(ask, 2)
+        
+
+def inventory_skewing(data, bid, ask):
 
     pos = data['position']
     F = abs(pos // MAX_VOLUME)
 
     if pos > 0:
-        ask = data['mid'] + data['vol_spread'] * (1 / (1 + F))
-        bid = data['mid'] - (1 + F) * data['vol_spread']
+        ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
+        bid = data['mid'] - (1 + F) * (data['mid'] - bid)
     elif pos < 0:
-        ask = data['mid'] + (1 + F) * data['vol_spread']
-        bid = data['mid'] - data['vol_spread'] * (1 / (1 + F))
-    else:
-        ask = data['mid'] + data['vol_spread']
-        bid = data['mid'] - data['vol_spread']
+        ask = data['mid'] + (1 + F) * (ask - data['mid'])
+        bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
 
     return round(bid, 2), round(ask, 2)
 
@@ -349,6 +367,7 @@ def main():
                 cancel_all_orders(session)
                 
                 vol_spreading(data, VOL_CALIBRATION)
+                bid, ask = trend_skewing(data)
                 bid, ask = inventory_skewing(data)
                 data['current_bid'] = bid
                 data['current_ask'] = ask
