@@ -23,9 +23,9 @@ BOOK_LIMIT = 40
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 50
 
-VOL_CALIBRATION = 0.5
+VOL_CALIBRATION = 1
 TREND_SKEW_CALIBRATION = 1
-INVENTORY_SKEW_CALIBRATION = 1
+INVENTORY_SKEW_CALIBRATION = 2
 STOP_LOSS_CALIBRATION = 1
 
 START_TICK = 10
@@ -102,46 +102,6 @@ def get_security_info(session, data):
         data['ask'] = resp['ask']
         data['realized_profit'] = resp['realized']
         return data
-    return ApiException("Auth Error. Check API Key")
-
-OBKEYS = ['price', 'quantity', 'quantity_filled']
-def aggregate_order_book(items, ascending):
-    df = pd.DataFrame(
-        [
-            {
-                key: bid[key]
-                for key in OBKEYS
-            }
-            for bid in items
-            if bid['status'] == "OPEN"
-        ],
-        columns = OBKEYS
-    )
-    df['quantity'] = df.quantity - df.quantity_filled
-    df = df[df.quantity != 0].drop('quantity_filled', axis=1)
-    df = df.groupby('price').sum().sort_index(ascending = ascending).reset_index()
-    vwap = (df.price * (df.quantity / df.quantity.sum())).sum()
-    return df, vwap
-
-def get_order_book(session, data):
-    resp = session.get(f"http://localhost:9999/v1/securities/book?ticker=ALGO&limit={BOOK_LIMIT}")
-    if resp.ok:
-        resp = resp.json()
-        data['bid_ladder'], data['bid_vwap'] = aggregate_order_book(resp['bids'], False)
-        data['ask_ladder'], data['ask_vwap'] = aggregate_order_book(resp['asks'], False)
-        if data['bid_ladder'].shape[0] == 0 or data['ask_ladder'].shape[0] == 0:
-            return data
-                
-        bid_volume = data['bid_ladder'].quantity.sum()
-        ask_volume = data['ask_ladder'].quantity.sum()
-        data['LOB_imbalance'] = (bid_volume - ask_volume) / (bid_volume + ask_volume)
-
-        bid_vwap_spread = data['mid'] - data['bid_vwap']
-        ask_vwap_spread = data['ask_vwap'] - data['mid']
-        data['LOB_mass_imbalance'] =  (ask_vwap_spread - bid_vwap_spread) / (bid_vwap_spread + ask_vwap_spread)
-
-        return data
-
     return ApiException("Auth Error. Check API Key")
 
 HISTCOLS = ['tick', 'open', 'high', 'low', 'close']
@@ -310,47 +270,13 @@ def inventory_skewing(data, bid, ask):
     F = abs(pos // MAX_VOLUME) * INVENTORY_SKEW_CALIBRATION
 
     if pos > 0:
-        ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
+        # ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
         bid = data['mid'] - (1 + F) * (data['mid'] - bid)
     elif pos < 0:
         ask = data['mid'] + (1 + F) * (ask - data['mid'])
-        bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
+        # bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
 
     return round(bid, 2), round(ask, 2)
-
-def stop_loss(data):
-
-    pos = data['position']
-    if pos == 0: return []
-
-    pnl, pnl_threshold = 0, 0
-    if pos > 0:
-        pnl_threshold = round((data['position_vwap'] - data['current_ask']) * STOP_LOSS_CALIBRATION, 3)
-        pnl = round(data['mid'] - data['position_vwap'], 3)
-    if pos < 0:
-        pnl_threshold = round((data['current_bid'] - data['position_vwap']) * STOP_LOSS_CALIBRATION, 3)
-        pnl = round(data['position_vwap'] - data['mid'], 3)
-
-    data['pnl'] = pnl
-    data['pnl_threshold'] = pnl_threshold
-
-    if pnl < pnl_threshold:
-        print("Threshold Breached.", pnl_threshold, pnl)
-        return get_liquidating_orders(data, isMarket = True)
-    else:
-        return [] 
-
-def init_log():
-    logger.info("tick,last,bid,mid,ask,bid_vwap,ask_vwap,LOB_imbalance,LOB_mass_imbalance,vol,time_factor,vol_spread,trend,trend_confidence,gtrend,gtrend_confidence,position,current_bid,position_vwap,current_ask")
-
-def init_log():
-    logger.info("tick,last,bid,mid,ask,current_bid,mid,current_ask,position,position_vwap,pnl,pnl_threshold,realized")
-
-def log(data):
-    logger.info(f"{data['tick']},{data['last']},{data['bid']},{data['mid']},{data['ask']},{data['bid_vwap']},{data['ask_vwap']},{data['LOB_imbalance']},{data['LOB_mass_imbalance']},{data['vol']},{data['time_factor']},{data['vol_spread']},{data['trend']},{data['trend_confidence']},{data['gtrend']},{data['gtrend_confidence']},{data['position']},{data['current_bid']},{data['position_vwap']},{data['current_ask']}")
-
-def log(data):
-    logger.info(f"{data['tick']},{data['last']},{data['bid']},{data['mid']},{data['ask']},{data['current_bid']},{data['mid']},{data['current_ask']},{data['position']},{data['position_vwap']},{data['pnl']},{data['pnl_threshold']},{data['realized_profit']}")
 
 ###################################################################################################
 
@@ -359,18 +285,14 @@ def log(data):
 
 def main():
 
-    init_log()
-    position = 0
-    realized = 0
-    init = True
-    stop_loss_active = False
+    tick = 0
 
     with requests.Session() as session:
         session.headers.update(API_KEY)
 
         while data['tick'] != 299 and not shutdown:
             
-            ## Dont trade for first 5 ticks
+            ## Dont trade for first n ticks
             get_tick(session, data)
             if data['tick'] < START_TICK:
                 continue
@@ -386,9 +308,31 @@ def main():
             get_security_info(session, data)
             get_price_history(session, data)
             get_time_and_sales(session, data)
-            # get_order_book(session, data)
 
-            log(data)
+            if data['tick'] != tick:
+                
+                if data['position'] == 0: cancel_all_orders(session)
+
+                vol_spreading(data, VOL_CALIBRATION)
+                bid, ask = trend_skewing(data)
+                bid, ask = inventory_skewing(data, bid, ask)
+                data['current_bid'] = bid
+                data['current_ask'] = ask
+
+                bid_order = build_order("LIMIT", MAX_VOLUME, bid, "BUY")
+                send_order(session, bid_order)
+
+                ask_order = build_order("LIMIT", MAX_VOLUME, ask, "SELL")
+                send_order(session, ask_order)
+
+                print("------------")
+                print("Tick", data['tick'])
+                print("Position", data['position'])
+                print(f"({bid}, {data['mid']}, {ask})")
+                print("Volatility", round(data['vol'] * 100, 4))
+                print("Vol-Spread", data['vol_spread'])
+
+                tick = data['tick']
 
 if __name__ == '__main__':
 
