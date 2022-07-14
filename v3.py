@@ -23,9 +23,9 @@ BOOK_LIMIT = 40
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 50
 
-VOL_CALIBRATION = 1
+VOL_CALIBRATION = 0.75
 TREND_SKEW_CALIBRATION = 1
-INVENTORY_SKEW_CALIBRATION = 2
+INVENTORY_SKEW_CALIBRATION = 3
 STOP_LOSS_CALIBRATION = 1
 
 START_TICK = 10
@@ -286,6 +286,9 @@ def inventory_skewing(data, bid, ask):
 def main():
 
     tick = 0
+    ticks_since_cancel = 0
+    bid_partial_sent = False
+    ask_partial_sent = False
 
     with requests.Session() as session:
         session.headers.update(API_KEY)
@@ -311,7 +314,11 @@ def main():
 
             if data['tick'] != tick:
                 
-                if data['position'] == 0: cancel_all_orders(session)
+                if data['position'] == 0 or data['tick'] - ticks_since_cancel > 5:
+                    cancel_all_orders(session)
+                    ticks_since_cancel = data['tick']
+                    bid_partial_sent = False
+                    ask_partial_sent = False
 
                 vol_spreading(data, VOL_CALIBRATION)
                 bid, ask = trend_skewing(data)
@@ -319,14 +326,25 @@ def main():
                 data['current_bid'] = bid
                 data['current_ask'] = ask
 
+                pos = data['position']
+                r = pos % MAX_VOLUME
                 bid_order = build_order("LIMIT", MAX_VOLUME, bid, "BUY")
                 send_order(session, bid_order)
+                if r > 0 and not bid_partial_sent:
+                    bid_order = build_order("LIMIT", r, bid, "BUY")
+                    send_order(session, bid_order)
+                    bid_partial_sent = True
 
                 ask_order = build_order("LIMIT", MAX_VOLUME, ask, "SELL")
                 send_order(session, ask_order)
+                if r < 0 and not ask_partial_sent:
+                    bid_order = build_order("LIMIT", abs(r), ask, "SELL")
+                    send_order(session, bid_order)
+                    ask_partial_sent = True
 
                 print("------------")
                 print("Tick", data['tick'])
+                print("Tick Since Last Cancel", data['tick'] - ticks_since_cancel)
                 print("Position", data['position'])
                 print(f"({bid}, {data['mid']}, {ask})")
                 print("Volatility", round(data['vol'] * 100, 4))
