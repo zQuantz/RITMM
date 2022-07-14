@@ -20,12 +20,11 @@ MAX_ORDERS = 3
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 10
 
-VOL_CALIBRATION = 1.5
+VOL_CALIBRATION = 1
 TREND_SKEW_CALIBRATION = 3
-TIGHT_INVENTORY_SKEW_CALIBRATION = 0.2
-LOOSE_INVENTORY_SKEW_CALIBRATION = 3
+TIGHT_INVENTORY_SKEW_CALIBRATION = 0.5
+LOOSE_INVENTORY_SKEW_CALIBRATION = 2
 ORDER_PROXIMITY_CALIBRATION = 0.5
-
 
 OLD_ORDER_CALIBRATION = 7
 MAX_HOLDING_PERIOD = 20
@@ -197,13 +196,13 @@ def execute_orders(session, data, bid, ask, open_bids, open_asks):
 		orders = open_bids if data['position'] > 0 else open_asks
 		for order in orders:
 			if order['quantity'] % MAX_VOLUME == 0: continue
-			cancel_order(session, order[0])
+			cancel_order(session, order['order_id'])
 		return
 
 	action, price, key = ("SELL", ask, "ask_orders") if data['position'] > 0 else ("BUY", bid, "bid_orders")
-	ask_order = build_order("LIMIT", r, price, key)
+	order = build_order("LIMIT", r, price, key)
 	
-	oid = send_order(session, ask_order)	
+	oid = send_order(session, order)
 	data[key].append((oid, price, data['tick'], r))
 
 def send_order(session, order):
@@ -346,12 +345,16 @@ def main():
 				liquidate_position(session, data, isMarket = True)
 				break
 
+			get_security_info(session, data)
+			if data['position'] == 0 or np.sign(data['position']) == -1 * np.sign(position):
+				position_holding = 0
+				position = data['position']
+
 			if data['tick'] != tick:
 				
 				###################################################################################
 				## Data Collection
 
-				get_security_info(session, data)
 				get_price_history(session, data)
 				get_time_and_sales(session, data)
 
@@ -392,7 +395,6 @@ def main():
 				if data['position'] != 0 and position_holding > MAX_HOLDING_PERIOD + 1 - F:
 					print("Liquidating Positions", data['position'], position_holding, MAX_HOLDING_PERIOD + 1 - F)
 					liquidate_position(session, data)
-					display(data)
 					tick = data['tick']
 					continue
 
@@ -402,12 +404,14 @@ def main():
 				noSimilarBid = all(
 					abs(bid - order[1]) > data['vol_spread'] * ORDER_PROXIMITY_CALIBRATION
 					for order in data['bid_orders']
+					if (order[-1] % MAX_VOLUME) == 0
 				)
 				noSimilarAsk = all(
 					abs(ask - order[1]) > data['vol_spread'] * ORDER_PROXIMITY_CALIBRATION
 					for order in data['ask_orders']
+					if (order[-1] % MAX_VOLUME) == 0
 				)
-				if (noSimilarBid and noSimilarAsk):
+				if (noSimilarBid or noSimilarAsk):
 					execute_orders(session, data, bid, ask, open_bids, open_asks)
 
 				display(data)
