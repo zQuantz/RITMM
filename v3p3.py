@@ -20,16 +20,13 @@ MAX_ORDERS = 3
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 10
 
-VOL_CALIBRATION = 1.5
-TREND_SKEW_CALIBRATION = 3
-TIGHT_INVENTORY_SKEW_CALIBRATION = 0.2
-LOOSE_INVENTORY_SKEW_CALIBRATION = 3
-ORDER_PROXIMITY_CALIBRATION = 0.5
-
+VOL_CALIBRATION = 0.3
+TREND_SKEW_CALIBRATION = 1
+INVENTORY_SKEW_CALIBRATION = 3
+ORDER_PROXIMITY_CALIBRATION = 0
 
 OLD_ORDER_CALIBRATION = 7
 MAX_HOLDING_PERIOD = 20
-MAX_HOLDING_CALIBRATION = 2
 
 START_TICK = 10
 END_TICK = 290
@@ -45,6 +42,7 @@ data = {
 	'bid': 0,
 	'mid': 0,
 	'ask': 0,
+	'realized': 0,
 
 	## Calculated Metrics
 	'gtrend': 0,
@@ -52,7 +50,6 @@ data = {
 	'gtrend_confidence': 0,
 	'trend_confidence': 0,
 	'trend_factor': 0,
-	'trend_factor_mmm': 0,
 	'vol': 0,
 	'vol_spread': 0,
 	'current_bid': 0,
@@ -86,6 +83,7 @@ def get_security_info(session, data):
 		resp = resp.json()[0]
 		data['position'] = resp['position']
 		data['position_vwap'] = resp['vwap']
+		data['realized'] = resp['realized']
 		data['last'] = resp['last']
 		data['mid'] = round((resp['bid'] + resp['ask']) / 2, 2)
 		data['bid'] = resp['bid']
@@ -125,16 +123,6 @@ def get_order_details(session, _id):
 	if resp.ok: return resp.json()
 	return ApiException("Auth Error. Check API Key")
 
-TASCOLS = ['id', 'period', 'tick', 'price', 'quantity']
-def get_time_and_sales(session, data):
-    resp = session.get(f"http://localhost:9999/v1/securities/tas?ticker=ALGO")
-    if resp.ok:
-        df = pd.DataFrame(resp.json(), columns = TASCOLS).sort_values('tick', ascending = True)
-        df = df.groupby('tick').agg({'quantity': ['mean', 'sum']}).reset_index()
-        df.columns = ['tick', 'avg_trade_volume', 'total_volume']
-        data['time_factor'] = ((df['avg_trade_volume'] / (df['total_volume'] + 1)) ** 2).values.mean()
-    return ApiException("Auth Error. Check API Key")
-
 def build_order(_type, quantity, price, action):
 	return {
 		'ticker': 'ALGO',
@@ -147,6 +135,7 @@ def build_order(_type, quantity, price, action):
 def get_orders(data, bid, ask):
 
 	pos = data['position']
+	n = abs(int(pos // MAX_VOLUME))
 	r = abs(int(pos % MAX_VOLUME))
 	if pos > 0:
 		buy_orders = [
@@ -155,7 +144,7 @@ def get_orders(data, bid, ask):
 		]
 		sell_orders = [
 			build_order("LIMIT", MAX_VOLUME, ask, "SELL")
-			for i in range(N_ORDERS)
+			for i in range(n)
 		]
 		sell_orders.append(build_order("LIMIT", r, ask, "SELL"))
 	elif pos < 0:
@@ -182,29 +171,6 @@ def get_orders(data, bid, ask):
 	sell_orders = [order for order in sell_orders if order['quantity'] != 0][::-1]
 	return buy_orders, sell_orders
 
-def execute_orders(session, data, bid, ask, open_bids, open_asks):
-
-	bid_order = build_order("LIMIT", MAX_VOLUME, bid, "BUY")
-	bid_oid = send_order(session, bid_order)
-	data['bid_orders'].append((bid_oid, bid, data['tick'], MAX_VOLUME))
-
-	ask_order = build_order("LIMIT", MAX_VOLUME, ask, "SELL")
-	ask_oid = send_order(session, ask_order)
-	data['ask_orders'].append((ask_oid, ask, data['tick'], MAX_VOLUME))
-
-	r = abs(data['position']) % MAX_VOLUME
-	if r == 0:
-		orders = open_bids if data['position'] > 0 else open_asks
-		for order in orders:
-			if order['quantity'] % MAX_VOLUME == 0: continue
-			cancel_order(session, order[0])
-		return
-
-	action, price, key = ("SELL", ask, "ask_orders") if data['position'] > 0 else ("BUY", bid, "bid_orders")
-	ask_order = build_order("LIMIT", r, price, key)
-	
-	oid = send_order(session, ask_order)	
-	data[key].append((oid, price, data['tick'], r))
 
 def send_order(session, order):
 	if order['type'] == "MARKET": order['dry_run'] = 0
@@ -251,12 +217,12 @@ def cancel_all_orders(session):
 
 def cancel_old_orders(session, data, orders, open_orders):
 	new_oids = []
-	for (oid, price, _tick, qty) in orders:
+	for (oid, price, _tick) in orders:
 		if oid not in open_orders: continue
 		elif data['tick'] - _tick > OLD_ORDER_CALIBRATION:
 			cancel_order(session, oid)
 		else:
-			new_oids.append((oid, price, _tick, qty))
+			new_oids.append((oid, price, _tick))
 	return new_oids
 
 ## Bid / Ask Functions
@@ -270,14 +236,12 @@ def trend_skewing(data):
 	trend = data['gtrend']
 	vol = data['vol']
 	
-	data['trend_factor'] = np.exp(TREND_SKEW_CALIBRATION * trend)
+	data['trend_factor'] = np.exp(TREND_SKEW_CALIBRATION * trend / np.sqrt(vol))
 	
 	if data['gtrend_confidence'] > 1.5:
 		
 		ask = data['trend_factor'] * ask
 		bid = data['trend_factor'] * bid
-
-		data['trend_factor_mmm'] = data['trend_factor'] * data['mid'] - data['mid']
 
 		if bid >= data['mid']:
 			bid = data['mid']
@@ -290,15 +254,14 @@ def trend_skewing(data):
 def inventory_skewing(data, bid, ask):
 
 	pos = data['position']
-	F_tight = abs(pos // MAX_VOLUME) * TIGHT_INVENTORY_SKEW_CALIBRATION
-	F_loose = abs(pos // MAX_VOLUME) * LOOSE_INVENTORY_SKEW_CALIBRATION
+	F = abs(pos // MAX_VOLUME) * INVENTORY_SKEW_CALIBRATION
 
 	if pos > 0:
-		ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F_tight))
-		bid = data['mid'] - (1 + F_loose) * (data['mid'] - bid)
+		ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
+		bid = data['mid'] - (1 + F) * (data['mid'] - bid)
 	elif pos < 0:
-		ask = data['mid'] + (1 + F_loose) * (ask - data['mid'])
-		bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F_tight))
+		ask = data['mid'] + (1 + F) * (ask - data['mid'])
+		bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
 
 	return round(bid, 2), round(ask, 2)
 
@@ -310,10 +273,8 @@ def display(data):
 	print("Position", data['position'])
 	print(f"({data['current_bid']}, {data['mid']}, {data['current_ask']})")
 	print("Volatility", round(data['vol'] * 100, 4))
-	print("Time-Factor", round(data['time_factor'], 4))
 	print("Vol-Spread", data['vol_spread'])
 	print("Trend Factor", data['trend_factor'])
-	print("Trend Factor Mid-Minus-Mid", data['trend_factor_mmm'])
 	print("G.Trend Confidence", data['gtrend_confidence'])
 	print("Trend Confidence", data['trend_confidence'])
 	# print("Open Bids")
@@ -330,6 +291,7 @@ def main():
 	tick = 0
 	position = 0
 	position_holding = 0
+	init = True
 
 	with requests.Session() as session:
 		session.headers.update(API_KEY)
@@ -343,30 +305,29 @@ def main():
 
 			## Liquidate everything with 10 ticks remaining
 			if data['tick'] > END_TICK:
-				liquidate_position(session, data, isMarket = True)
-				break
+				liquidate_position(session, data)
+				continue
 
-			if data['tick'] != tick:
+			if (data['position'] == 0 and position != 0) or init or data['tick'] != tick:
 				
+				print("Data")
+
 				###################################################################################
 				## Data Collection
 
 				get_security_info(session, data)
 				get_price_history(session, data)
-				get_time_and_sales(session, data)
 
 				###################################################################################
 				## Order Management
 
 				open_orders = get_open_orders(session)
-				open_bids = [order for order in open_orders if order['action'] == "BUY"]
-				open_bid_oids = [order['order_id'] for order in open_bids]
+				open_bids = [order['order_id'] for order in open_orders if order['action'] == "BUY"]
+				open_asks = [order['order_id'] for order in open_orders if order['action'] == "SELL"]
+				print(len(open_bids), len(open_asks))
 
-				open_asks = [order for order in open_orders if order['action'] == "SELL"]
-				open_ask_oids = [order['order_id'] for order in open_asks]
-
-				data['bid_orders'] = cancel_old_orders(session, data, data['bid_orders'], open_bid_oids)
-				data['ask_orders'] = cancel_old_orders(session, data, data['ask_orders'], open_ask_oids)
+				data['bid_orders'] = cancel_old_orders(session, data, data['bid_orders'], open_bids)
+				data['ask_orders'] = cancel_old_orders(session, data, data['ask_orders'], open_asks)
 
 				###################################################################################
 				## Bid / Ask Skewing
@@ -380,21 +341,15 @@ def main():
 				###################################################################################
 				## External Hedger
 
-				if abs(data['position']) >= 0:
+				if abs(data['position']) >= abs(position):
 					position_holding += 1
-				elif np.sign(data['position']) == -1 * np.sign(position):
-					position_holding = 0
 				else:
 					position_holding = 0
-				position = data['position']
 
-				F = abs(data['position'] // MAX_VOLUME) * MAX_HOLDING_CALIBRATION
+				F = abs(data['position'] // MAX_VOLUME)
 				if data['position'] != 0 and position_holding > MAX_HOLDING_PERIOD + 1 - F:
 					print("Liquidating Positions", data['position'], position_holding, MAX_HOLDING_PERIOD + 1 - F)
-					liquidate_position(session, data)
-					display(data)
-					tick = data['tick']
-					continue
+					liquidate_position(session, data, isMarket = True)
 
 				###################################################################################
 				## Order Placement
@@ -408,10 +363,35 @@ def main():
 					for order in data['ask_orders']
 				)
 				if (noSimilarBid and noSimilarAsk):
-					execute_orders(session, data, bid, ask, open_bids, open_asks)
+
+					bid_order = build_order("LIMIT", MAX_VOLUME, bid, "BUY")
+					bid_oid = send_order(session, bid_order)
+					data['bid_orders'].append((bid_oid, bid, data['tick']))
+
+					ask_order = build_order("LIMIT", MAX_VOLUME, ask, "SELL")
+					ask_oid = send_order(session, ask_order)
+					data['ask_orders'].append((ask_oid, ask, data['tick']))
+
+				###################################################################################
+				## Odd Lot Management
+
+				r = data['position'] % MAX_VOLUME
+				if r != 0:
+					order = build_order("MARKET", r, 0, "SELL" if data['position'] > 0 else "BUY")
+					send_order(session, order)
 
 				display(data)
+
 				tick = data['tick']
+				position = data['position']
+				realized = data['realized']
+				position = data['position']
+				init = False
+
+			elif data['position'] == position and data['position'] == 0 and data['realized'] != realized:
+
+				init = True
+				stop_loss_active = True
 
 if __name__ == '__main__':
 
