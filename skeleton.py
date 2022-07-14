@@ -7,9 +7,11 @@ import numpy as np
 import requests
 import sys, os
 import signal
+import locale
 
 ###################################################################################################
 
+LOC = locale.getdefaultlocale()[0]
 shutdown = False
 
 MAX_VOLUME = 5_000
@@ -18,10 +20,13 @@ MKT_COM = 0.01
 LMT_COM = 0.005
 
 BOOK_LIMIT = 40
-VOL_CALIBRATION = 1.5
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 50
+
+VOL_CALIBRATION = 0.5
 TREND_SKEW_CALIBRATION = 1
+INVENTORY_SKEW_CALIBRATION = 1
+STOP_LOSS_CALIBRATION = 1
 
 START_TICK = 10
 END_TICK = 290
@@ -35,8 +40,9 @@ data = {
     'position_vwap': 0,
     'last': 0,
     'bid': 0,
-    'pmid': 0,
+    'mid': 0,
     'ask': 0,
+    'realized_profit': 0,
 
     ## Order Book Info
     'bid_ladder': pd.DataFrame(),
@@ -62,7 +68,9 @@ data = {
     'time_factor': 0,
     'current_bid': 0,
     'current_ask': 0,
-    'n_transacted_orders': 0
+    'n_open_orders': 0,
+    'pnl': 0,
+    'pnl_threshold': 0
 }
 
 ###################################################################################################
@@ -87,11 +95,12 @@ def get_security_info(session, data):
     if resp.ok:
         resp = resp.json()[0]
         data['position'] = resp['position']
-        data['position_vwap'] = resp['vwap'] 
+        data['position_vwap'] = resp['vwap']
         data['last'] = resp['last']
         data['mid'] = round((resp['bid'] + resp['ask']) / 2, 2)
         data['bid'] = resp['bid']
         data['ask'] = resp['ask']
+        data['realized_profit'] = resp['realized']
         return data
     return ApiException("Auth Error. Check API Key")
 
@@ -236,7 +245,7 @@ def get_orders(data, bid, ask):
     sell_orders = [order for order in sell_orders if order['quantity'] != 0][::-1]
     return buy_orders, sell_orders
 
-def get_liquidating_orders(data):
+def get_liquidating_orders(data, isMarket = False):
 
     pos = data['position']
     n = abs(int(pos // MAX_VOLUME))
@@ -245,15 +254,15 @@ def get_liquidating_orders(data):
     price = data['bid'] if pos < 0 else data['ask']
 
     orders = [
-        build_order("LIMIT", MAX_VOLUME, price, action)
+        build_order("MARKET" if isMarket else "LIMIT", MAX_VOLUME, price, action)
         for i in range(n)
     ]
-    orders.append(build_order("LIMIT", r, price, action))
+    orders.append(build_order("MARKET" if isMarket else "LIMIT", r, price, action))
     return [order for order in orders if order['quantity'] != 0]
 
 ## Subject to rate limits
 def send_order(session, order):
-    if order['type'] == "MARKET": body['dry_run'] = 0
+    if order['type'] == "MARKET": order['dry_run'] = 0
     resp = session.post("http://localhost:9999/v1/orders", params = order)
     if resp.status_code == 429:
         sleep(resp.json()['wait'] / 1_000)
@@ -294,12 +303,11 @@ def trend_skewing(data):
     		ask = data['mid']
 
     return round(bid, 2), round(ask, 2)
-        
 
 def inventory_skewing(data, bid, ask):
 
     pos = data['position']
-    F = abs(pos // MAX_VOLUME)
+    F = abs(pos // MAX_VOLUME) * INVENTORY_SKEW_CALIBRATION
 
     if pos > 0:
         ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
@@ -310,11 +318,39 @@ def inventory_skewing(data, bid, ask):
 
     return round(bid, 2), round(ask, 2)
 
+def stop_loss(data):
+
+    pos = data['position']
+    if pos == 0: return []
+
+    pnl, pnl_threshold = 0, 0
+    if pos > 0:
+        pnl_threshold = round((data['position_vwap'] - data['current_ask']) * STOP_LOSS_CALIBRATION, 3)
+        pnl = round(data['mid'] - data['position_vwap'], 3)
+    if pos < 0:
+        pnl_threshold = round((data['current_bid'] - data['position_vwap']) * STOP_LOSS_CALIBRATION, 3)
+        pnl = round(data['position_vwap'] - data['mid'], 3)
+
+    data['pnl'] = pnl
+    data['pnl_threshold'] = pnl_threshold
+
+    if pnl < pnl_threshold:
+        print("Threshold Breached.", pnl_threshold, pnl)
+        return get_liquidating_orders(data, isMarket = True)
+    else:
+        return [] 
+
 def init_log():
     logger.info("tick,last,bid,mid,ask,bid_vwap,ask_vwap,LOB_imbalance,LOB_mass_imbalance,vol,time_factor,vol_spread,trend,trend_confidence,gtrend,gtrend_confidence,position,current_bid,position_vwap,current_ask")
 
+def init_log():
+    logger.info("tick,last,bid,mid,ask,current_bid,mid,current_ask,position,position_vwap,pnl,pnl_threshold,realized")
+
 def log(data):
     logger.info(f"{data['tick']},{data['last']},{data['bid']},{data['mid']},{data['ask']},{data['bid_vwap']},{data['ask_vwap']},{data['LOB_imbalance']},{data['LOB_mass_imbalance']},{data['vol']},{data['time_factor']},{data['vol_spread']},{data['trend']},{data['trend_confidence']},{data['gtrend']},{data['gtrend_confidence']},{data['position']},{data['current_bid']},{data['position_vwap']},{data['current_ask']}")
+
+def log(data):
+    logger.info(f"{data['tick']},{data['last']},{data['bid']},{data['mid']},{data['ask']},{data['current_bid']},{data['mid']},{data['current_ask']},{data['position']},{data['position_vwap']},{data['pnl']},{data['pnl_threshold']},{data['realized_profit']}")
 
 ###################################################################################################
 
@@ -323,72 +359,79 @@ def log(data):
 
 def main():
 
-    # init_log()
+    init_log()
+    position = 0
+    realized = 0
+    init = True
+    stop_loss_active = False
 
     with requests.Session() as session:
         session.headers.update(API_KEY)
 
-        while True:
+        while data['tick'] != 299 and not shutdown:
+            
+            ## Dont trade for first 5 ticks
+            get_tick(session, data)
+            if data['tick'] < START_TICK:
+                continue
 
-            data['n_transacted_orders'] = 0
-            data['tick'] = 0
-            init = True
+            ## Liquidate everything with 10 ticks remaining
+            if data['tick'] > END_TICK:
+                # get_order_book(session, data)
+                cancel_all_orders(session)
+                orders = get_liquidating_orders(data)
+                for order in orders:
+                    send_order(session, order)
 
-            while data['tick'] != 299:
+            get_security_info(session, data)
+            get_price_history(session, data)
+            get_time_and_sales(session, data)
+            # get_order_book(session, data)            
+
+            if (data['position'] == 0 and position != 0) or init:                
                 
-                ## Dont trade for first 5 ticks
-                get_tick(session, data)
-                if data['tick'] < START_TICK:
-                    continue
+                cancel_all_orders(session)
 
-                ## Liquidate everything with 10 ticks remaining
-                if data['tick'] > END_TICK:
-                    get_order_book(session, data)
-                    cancel_all_orders(session)
-                    orders = get_liquidating_orders(data)
-                    for order in orders:
-                        send_order(session, order)
+                vol_spreading(data, VOL_CALIBRATION)
+                bid, ask = trend_skewing(data)
+                bid, ask = inventory_skewing(data, bid, ask)
+                data['current_bid'] = bid
+                data['current_ask'] = ask
 
-                get_security_info(session, data)
-                get_order_book(session, data)
-                get_price_history(session, data)
-                get_time_and_sales(session, data)
+                print("------------")
+                print("Tick", data['tick'])
+                # print("N open orders", len(open_orders))
+                print(f"({bid}, {data['mid']}, {ask})")
+                # print("Position", data['position'])
+                # print("VWAP", data['position_vwap'])
+                # print("P&L", (data['position_vwap'] - data['mid']) * data['position'])
+                print("Volatility", round(data['vol'] * 100, 4))
+                print("Vol-Spread", data['vol_spread'])
 
-                # log(data)
+                buy_orders, sell_orders = get_orders(data, bid, ask)
+                for order in sell_orders:
+                    send_order(session, order)
+                for order in buy_orders:
+                    send_order(session, order)
 
-                transacted_orders = get_transacted_orders(session)
-                n = data['n_transacted_orders']
-                if data['position'] != 0:
-                    print(f"Position: {data['position']}, PnL/Share: {np.sign(data['position']) * (data['position_vwap'] - data['mid'])}")
-                    
-                if len(transacted_orders) != n or init:
-                    
-                    cancel_all_orders(session)
-                    
-                    vol_spreading(data, VOL_CALIBRATION)
-                    bid, ask = trend_skewing(data)
-                    bid, ask = inventory_skewing(data)
-                    data['current_bid'] = bid
-                    data['current_ask'] = ask
-                    
-                    print("------------")
-                    print("Tick", data['tick'])
-                    print("N-transaction", len(transacted_orders))
-                    print(f"({bid}, {data['mid']}, {ask})")
-                    print("Position", data['position'])
-                    print("VWAP", data['position_vwap'])
-                    print("P&L", (data['position_vwap'] - data['mid']) * data['position'])
-                    print("Volatility", round(data['vol'] * 100, 4))
-                    print("Vol-Spread", data['vol_spread'])
+                position = data['position']
+                realized = data['realized_profit']
 
-                    buy_orders, sell_orders = get_orders(data, bid, ask)
-                    for order in buy_orders:
-                        send_order(session, order)
-                    for order in sell_orders:
-                        send_order(session, order)
-                    
-                    data['n_transacted_orders'] = len(transacted_orders)
-                    init = False
+                init = False
+                stop_loss_active = True
+
+            elif data['position'] == position and data['position'] == 0 and data['realized_profit'] != realized:
+
+                init = True
+                stop_loss_active = True
+
+            if stop_loss_active:
+                ## Monitor and Kill Positions
+                for order in stop_loss(data):
+                    send_order(session, order)
+                    stop_loss_active = False
+
+            log(data)
 
 if __name__ == '__main__':
 

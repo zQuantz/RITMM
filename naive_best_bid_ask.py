@@ -207,8 +207,8 @@ def main():
 			# 	print("-----------------------")
 			# 	tick = data['tick']
 
-		get_full_time_and_sales(session)
-		get_full_price_history(session)
+		# get_full_time_and_sales(session)
+		# get_full_price_history(session)
 
 if __name__ == '__main__':
 
