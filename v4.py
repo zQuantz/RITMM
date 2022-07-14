@@ -23,9 +23,10 @@ BOOK_LIMIT = 40
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 50
 
+N_TICKS_TO_RESET = 3
 VOL_CALIBRATION = 1
 TREND_SKEW_CALIBRATION = 1
-INVENTORY_SKEW_CALIBRATION = 3
+INVENTORY_SKEW_CALIBRATION = 1
 STOP_LOSS_CALIBRATION = 1
 
 START_TICK = 10
@@ -270,11 +271,11 @@ def inventory_skewing(data, bid, ask):
     F = abs(pos // MAX_VOLUME) * INVENTORY_SKEW_CALIBRATION
 
     if pos > 0:
-        ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
+        # ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
         bid = data['mid'] - (1 + F) * (data['mid'] - bid)
     elif pos < 0:
         ask = data['mid'] + (1 + F) * (ask - data['mid'])
-        bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
+        # bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
 
     return round(bid, 2), round(ask, 2)
 
@@ -286,7 +287,7 @@ def inventory_skewing(data, bid, ask):
 def main():
 
     tick = 0
-    ticks_since_cancel = 0
+    last_reset_tick = 0    
 
     with requests.Session() as session:
         session.headers.update(API_KEY)
@@ -310,39 +311,35 @@ def main():
             get_price_history(session, data)
             get_time_and_sales(session, data)
 
-            if data['tick'] - tick > 5:
-                
-                if data['position'] == 0 or data['tick'] - ticks_since_cancel > 5:
+            if data['tick'] != tick:
+
+                if data['tick'] - last_reset_tick < N_TICKS_TO_RESET and len(get_open_orders(session)) != 0:
+                    pass
+                else:
                     cancel_all_orders(session)
-                    ticks_since_cancel = data['tick']
 
-                vol_spreading(data, VOL_CALIBRATION)
-                bid, ask = trend_skewing(data)
-                bid, ask = inventory_skewing(data, bid, ask)
-                data['current_bid'] = bid
-                data['current_ask'] = ask
+                    ## Price Setting
+                    vol_spreading(data, VOL_CALIBRATION)
+                    bid, ask = trend_skewing(data)
+                    bid, ask = inventory_skewing(data, bid, ask)
+                    data['current_bid'] = bid
+                    data['current_ask'] = ask
 
-                pos = data['position']
-                r = pos % MAX_VOLUME
-                bid_order = build_order("LIMIT", MAX_VOLUME, bid, "BUY")
-                send_order(session, bid_order)
-                if r > 0:
-                    bid_order = build_order("MARKET", r, bid, "BUY")
-                    send_order(session, bid_order)
+                    buy_orders, sell_orders = get_orders(data, bid, ask)
+                    for order in sell_orders:
+                        send_order(session, order)
+                    for order in buy_orders:
+                        send_order(session, order)
 
-                ask_order = build_order("LIMIT", MAX_VOLUME, ask, "SELL")
-                send_order(session, ask_order)
-                if r < 0:
-                    bid_order = build_order("MARKET", abs(r), ask, "SELL")
-                    send_order(session, bid_order)
-
-                print("------------")
-                print("Tick", data['tick'])
-                print("Tick Since Last Cancel", data['tick'] - ticks_since_cancel)
-                print("Position", data['position'])
-                print(f"({bid}, {data['mid']}, {ask})")
-                print("Volatility", round(data['vol'] * 100, 4))
-                print("Vol-Spread", data['vol_spread'])
+                    print("------------")
+                    print("Tick", data['tick'])
+                    print("Tick Since Last Cancel", data['tick'] - last_reset_tick)
+                    print("Position", data['position'])
+                    print("VWAP", data['position_vwap'])
+                    print(f"({bid}, {data['mid']}, {ask})")
+                    print("Volatility", round(data['vol'] * 100, 4))
+                    print("Vol-Spread", data['vol_spread'])
+                    last_reset_tick = data['tick']
 
                 tick = data['tick']
 
