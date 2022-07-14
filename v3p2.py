@@ -15,6 +15,7 @@ LOC = locale.getdefaultlocale()[0]
 shutdown = False
 
 MAX_VOLUME = 5_000
+MAX_ORDERS = 3
 
 N_ORDERS = 1
 ROLLING_TREND_LOOKBACK = 10
@@ -232,16 +233,16 @@ def inventory_skewing(data, bid, ask):
     F = abs(pos // MAX_VOLUME) * INVENTORY_SKEW_CALIBRATION
 
     if pos > 0:
-        ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
+        # ask = data['mid'] + (ask - data['mid']) * (1 / (1 + F))
         bid = data['mid'] - (1 + F) * (data['mid'] - bid)
     elif pos < 0:
         ask = data['mid'] + (1 + F) * (ask - data['mid'])
-        bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
+        # bid = data['mid'] - (data['mid'] - bid) * (1 / (1 + F))
 
     return round(bid, 2), round(ask, 2)
 
 ## Logging and Displays
-def display(data):
+def display(data, open_bids, open_asks):
 
     print("------------")
     print("Tick", data['tick'])
@@ -249,6 +250,12 @@ def display(data):
     print(f"({bid}, {data['mid']}, {ask})")
     print("Volatility", round(data['vol'] * 100, 4))
     print("Vol-Spread", data['vol_spread'])
+    print("Open Bids")
+    for order in open_bids:
+        print(f"[{order['action']} {order['quantity']} @ {order['price']}]")
+    print("Open Asks")
+    for order in open_asks:
+        print(f"[{order['action']} {order['quantity']} @ {order['price']}]")
 
 ###################################################################################################
 
@@ -289,7 +296,23 @@ def main():
                 data['current_bid'] = bid
                 data['current_ask'] = ask
 
-                if (
+                ## We can look at considering the bids and asks seperately
+                ## If we have less asks than bids, we likely have a short position
+                ## We want more open bids in this case to close that position
+                ## When we fill a bid (or whichever makes the statement above false)
+                ## We fill up with another bid and ask
+
+                if len(open_bids) > MAX_ORDERS or len(open_asks) > MAX_ORDERS:
+                    pass
+                
+                ## We only want to place bids and asks if they are staggered.
+                ## We dont want to stack many bids or asks at the same place
+                ## This may be redundant because of the above statement.
+                ## The idea is each bid/ask pair we send out is considered as its own trade
+                ## We previously considered it as one trade making us reduce profits
+                ## when we tried to get rid of the full position at one price
+
+                elif (
                     all(abs(bid - order[1]) > data['vol_spread'] * ORDER_PROXIMITY_CALIBRATION for order in data['bid_oids'])
                     and
                     all(abs(ask - order[1]) > data['vol_spread'] * ORDER_PROXIMITY_CALIBRATION for order in data['ask_oids'])
